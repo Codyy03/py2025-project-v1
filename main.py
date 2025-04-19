@@ -1,10 +1,6 @@
-import math
 from datetime import datetime
-from itertools import cycle
-import  numpy as np
-import time
-import  threading
 import random
+import numpy as np
 
 class Sensor:
     def __init__(self, sensor_id, name, unit, min_value, max_value, frequency=1):
@@ -26,6 +22,8 @@ class Sensor:
         self.frequency = frequency
         self.active = True
         self.last_value = None
+        self.history = []
+        self.last_read_time = datetime.now()
 
     def read_value(self):
         """
@@ -34,10 +32,14 @@ class Sensor:
         """
         if not self.active:
             raise Exception(f"Czujnik {self.name} jest wyłączony.")
+        now = datetime.now()
 
-        value = random.uniform(self.min_value, self.max_value)
-        self.last_value = value
-        return value
+        if (now - self.last_read_time).total_seconds() >= self.frequency:
+            value = random.uniform(self.min_value, self.max_value)
+            self.last_value = value
+            self.history.append((now,value))
+            self.last_read_time = now
+            return self.last_value
 
     def calibrate(self, calibration_factor):
         """
@@ -70,6 +72,9 @@ class Sensor:
         """
         self.active = False
 
+    def get_history(self):
+        return self.history
+
     def __str__(self):
         return f"Sensor(id={self.sensor_id}, name={self.name}, unit={self.unit})"
 
@@ -81,31 +86,66 @@ class TemperatureSensor(Sensor):
 
     # symulacja temperatury z uwzglednienem cyklu dziennego
     def read_value(self):
-        return  super().read_value()
+        # Symulacja temperatury:
+        if not self.active:
+            raise Exception(f"Czujnik {self.name} jest wyłączony.")
+        value = np.random.uniform(self.min_value, self.max_value)  # Losowa wartość z zakresu min_value - max_value
+        self.last_value = round(value, 2)  # Zaokrąglamy do 2 miejsc po przecinku
+        self.history.append((datetime.now(), self.last_value))  # Zapisujemy wartość do historii
+        return self.last_value
 
 class HumiditySensor(Sensor):
         def __init__(self, sensor_id, name="Czujnik wilgotności", unit="%", min_value=0, max_value=100, frequency=2):
             super().__init__(sensor_id, name, unit, min_value, max_value, frequency)
 
         def read_value(self, temperature=None):
+            # Symulacja wilgotności:
+            # Generuje losową wartość z zakresu (0%–100%).
+            # Jeśli podana jest temperatura, wilgotność jest modyfikowana (spada przy wysokich temperaturach i wzrasta przy niskich).
             if not self.active:
                 raise Exception(f"Czujnik {self.name} jest wyłączony.")
-
-            now = datetime.now().date()
-            difference = now -self.last_date
-
-            if difference.total_seconds() > self.frequency:
-                self.last_date = now
-                return super().read_value()
-            return self.last_value
-
-            #Uwzględnia wpływ temperatury – gdy podamy wartość temperatury, wilgotność spada przy wysokiej temperaturze i wzrasta przy niskiej.
             temp_factor = 0
-            if temperature  is not None:
-                temp_factor = max(-10, min(10, (25 - temperature)*0.5))
-
+            if temperature is not None:
+                temp_factor = max(-10, min(10, (25 - temperature) * 0.5))
             humidity = random.uniform(self.min_value, self.max_value) + temp_factor
             humidity = max(self.min_value, min(self.max_value, humidity))
-
             self.last_value = round(humidity, 2)
+            self.history.append((datetime.now(), self.last_value))
             return self.last_value
+
+class PressureSensor(Sensor):
+    def __init__(self, sensor_id, name="Czujnik ciśnienia", unit="hPa", min_value=950, max_value=1050, frequency=2):
+        super().__init__(sensor_id, name, unit, min_value, max_value, frequency)
+
+    def read_value(self):
+        # Symulacja ciśnienia atmosferycznego:
+        # Generuje wartość w oparciu o rozkład normalny (środek zakresu jako średnia, odchylenie standardowe wynosi 5).
+        # Wartość jest zaokrąglana do dwóch miejsc po przecinku.
+        if not self.active:
+            raise Exception(f"Czujnik {self.name} jest wyłączony.")
+        pressure = random.gauss((self.min_value + self.max_value) / 2, 5)  # Symulacja z fluktuacjami
+        pressure = max(self.min_value, min(self.max_value, pressure))
+        self.last_value = round(pressure, 2)
+        self.history.append((datetime.now(), self.last_value))
+        return self.last_value
+
+
+class LightSensor(Sensor):
+    def __init__(self, sensor_id, name="Czujnik światła", unit="lux", min_value=0, max_value=10000, frequency=2):
+        super().__init__(sensor_id, name, unit, min_value, max_value, frequency)
+
+    def read_value(self):
+        # Symulacja natężenia światła:
+        # Generuje losową wartość w zakresie (0–10,000 lux), uwzględniając porę dnia.
+        # Wartość jest większa w godzinach dziennych (6:00–18:00) i mniejsza w nocy.
+        if not self.active:
+            raise Exception(f"Czujnik {self.name} jest wyłączony.")
+        hour = datetime.now().hour
+        light_factor = (10000 if 6 <= hour <= 18 else 0)  # Symulacja zmiany oświetlenia wg pory dnia
+        light = random.uniform(self.min_value, self.max_value) * (light_factor / 10000)
+        self.last_value = round(light, 2)
+        self.history.append((datetime.now(), self.last_value))
+        return self.last_value
+
+
+
