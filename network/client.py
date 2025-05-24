@@ -46,7 +46,7 @@ class NetworkClient:
         if not self.sock:
             raise ConnectionError("Socket not connected. Call connect() first.")
         try:
-            payload = self._serialize(data) + b"\n"  # <-- tutaj dodaj \n
+            payload = self._serialize(data) + b"\n"  
             self.sock.sendall(payload)
             print("[DEBUG] Wysłano dane, oczekiwanie na odpowiedź...")
 
