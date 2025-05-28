@@ -8,6 +8,8 @@ import csv
 import json
 import time
 import shutil
+from GUI import SensorServerGUI
+import tkinter as tk
 
 from network.client import NetworkClient
 from server.server import NetworkServer
@@ -271,7 +273,9 @@ if is_server:
     print("[INFO] Uruchamianie jako SERWER")
     server = NetworkServer(port=5000)
     server.start()
-
+    root = tk.Tk()
+    app = SensorServerGUI(root)
+    root.mainloop()
     # Rejestracja callbacków do logowania lokalnego
     temp_sensor.register_callback(logger.log_reading)
     humidity_sensor.register_callback(logger.log_reading)
