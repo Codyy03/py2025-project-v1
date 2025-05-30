@@ -5,6 +5,7 @@ import yaml
 from typing import Optional
 from socket import socket as SocketType
 
+
 class NetworkServer:
     def __init__(self, port: Optional[int] = None):
         """Inicjalizuje serwer na wskazanym porcie."""
@@ -30,6 +31,9 @@ class NetworkServer:
                 try:
                     client_sock, addr = server_sock.accept()
                     print(f"\n🔌 Połączenie od {addr}")
+                    # Start a new thread or process to handle the client
+                    # For simplicity, we'll keep it in the main loop for now,
+                    # but for a production server, threading/async is crucial.
                     self._handle_client(client_sock)
                 except KeyboardInterrupt:
                     print("\nZatrzymano serwer.")
@@ -40,11 +44,20 @@ class NetworkServer:
     def _handle_client(self, client_socket: SocketType) -> None:
         with client_socket:
             buffer = ""
+            client_socket.settimeout(1.0)  # Add a timeout to the client socket
             try:
                 while True:
-                    chunk = client_socket.recv(1024).decode("utf-8")
+                    try:
+                        chunk = client_socket.recv(1024).decode("utf-8")
+                    except socket.timeout:
+                        # No data received within the timeout, continue looping to check for more data
+                        continue
+
                     if not chunk:
+                        # Client disconnected
+                        print(f"Klient {client_socket.getpeername()} rozłączył się.")
                         break
+
                     buffer += chunk
                     while "\n" in buffer:
                         line, buffer = buffer.split("\n", 1)
@@ -58,5 +71,3 @@ class NetworkServer:
                             print(f"Błąd JSON: {e}", file=sys.stderr)
             except Exception as e:
                 print(f"Błąd obsługi klienta: {e}", file=sys.stderr)
-
-

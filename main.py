@@ -1,3 +1,4 @@
+import threading
 import zipfile
 from datetime import datetime, timedelta
 import random
@@ -266,71 +267,31 @@ temp_sensor = Sensor("T1", "Czujnik temperatury", "°C", -20, 50, frequency=2)
 humidity_sensor = Sensor("H1", "Czujnik wilgotności", "%", 0, 100, frequency=2)
 pressure_sensor = Sensor("P1", "Czujnik ciśnienia", "hPa", 950, 1050, frequency=2)
 light_sensor = Sensor("L1","Czujnik natężenia światła","lux",0,1000,frequency=2)
+
 # Wybór trybu: klient lub serwer
 is_server = logger.config.get("is_server", False)
 
+def sensor_reading_loop():
+    try:
+        while True:
+            temp_sensor.read_value()
+            humidity_sensor.read_value()
+            pressure_sensor.read_value()
+            light_sensor.read_value()
+            time.sleep(2)
+    except KeyboardInterrupt:
+        print("Zatrzymano pętlę odczytu czujników.")
+
+
 if is_server:
-    print("[INFO] Uruchamianie jako SERWER")
-    server = NetworkServer(port=5000)
-    server.start()
+    print("[INFO] Uruchamianie jako SERWER Z GUI")
+    # TYLKO uruchamiamy GUI, które samo zainicjuje swój SensorServer
     root = tk.Tk()
-    app = SensorServerGUI(root)
-    root.mainloop()
-    # Rejestracja callbacków do logowania lokalnego
-    temp_sensor.register_callback(logger.log_reading)
-    humidity_sensor.register_callback(logger.log_reading)
-    pressure_sensor.register_callback(logger.log_reading)
-    light_sensor.register_callback(logger.log_reading)
+    app = SensorServerGUI(root)  # To uruchamia SensorServer w osobnym wątku
+    root.mainloop()  # To uruchamia główną pętlę Tkinter
 
-    try:
-        while True:
-            temp_sensor.read_value()
-            humidity_sensor.read_value()
-            pressure_sensor.read_value()
-            light_sensor.read_value()
-            time.sleep(2)
-    except KeyboardInterrupt:
-        print("Zatrzymano serwer.")
-
-else:
-    print("[INFO] Uruchamianie jako KLIENT")
-    client = NetworkClient()
-
-    try:
-        client.connect()
-    except ConnectionError as e:
-        print(f"[ERROR] Nie udało się połączyć z serwerem: {e}")
-        logger.stop()
-        exit(1)
-
-    # Callback logujący i wysyłający do serwera
-    def send_and_log(sensor_id, timestamp, value, unit):
-        logger.log_reading(sensor_id, timestamp, value, unit)
-        client.send({
-            "sensor_id": sensor_id,
-            "timestamp": timestamp.isoformat(),
-            "value": value,
-            "unit": unit
-        })
-
-    # Rejestracja callbacków do logowania i wysyłania
-    temp_sensor.register_callback(send_and_log)
-    humidity_sensor.register_callback(send_and_log)
-    pressure_sensor.register_callback(send_and_log)
-    light_sensor.register_callback(send_and_log)
-
-    try:
-        while True:
-            temp_sensor.read_value()
-            humidity_sensor.read_value()
-            pressure_sensor.read_value()
-            light_sensor.read_value()
-            time.sleep(2)
-    except KeyboardInterrupt:
-        print("Zatrzymano klienta.")
-
-# Zakończenie logowania, rotacja pliku
-logger.stop()
+    # WAŻNE: Tutaj NIE WOLNO wywoływać NetworkServer().start()
+    # ponieważ GUI już obsługuje rolę serwera.
 
 # Po zakończeniu procesu powinny być już pliki ZIP w katalogu 'archive'
 archived_files = os.listdir(archive_dir)

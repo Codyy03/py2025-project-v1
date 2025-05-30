@@ -11,201 +11,392 @@ from datetime import datetime, timedelta
 CONFIG_FILE = 'config.yaml'
 DEFAULT_PORT = 9999
 
-# === Serwer TCP (mock) ===
+# === Serwer TCP ===
 import socket
 import json
 
 
 class SensorServer(threading.Thread):
+    """
+    Klasa SensorServer uruchamia serwer TCP w osobnym wątku,
+    aby nie blokować głównego wątku GUI. Obsługuje wiele połączeń
+    klientów, przetwarzając dane i wysyłając potwierdzenia (ACK).
+    """
+
     def __init__(self, port, data_callback, error_callback):
-        super().__init__(daemon=True)
+        super().__init__(daemon=True)  # Ustaw wątek jako demon, aby zakończył się z głównym programem
         self.port = port
-        self.data_callback = data_callback
-        self.error_callback = error_callback
-        self.running = False
-        self.sock = None
+        self.data_callback = data_callback  # Funkcja do przekazywania danych do GUI
+        self.error_callback = error_callback  # Funkcja do przekazywania błędów do GUI
+        self.running = False  # Flaga kontrolująca cykl życia wątku serwera
+        self.sock = None  # Gniazdo serwera
 
     def run(self):
+        """
+        Główna pętla wątku serwera. Inicjalizuje gniazdo, nasłuchuje
+        na połączenia i dla każdego klienta uruchamia osobny wątek obsługi.
+        """
         try:
             self.running = True
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.bind(('0.0.0.0', self.port))
-            self.sock.listen(5)
-            self.sock.settimeout(1.0)
+            self.sock.listen(5)  # Maksymalna liczba oczekujących połączeń
+            self.sock.settimeout(1.0)  # Timeout dla metody accept(), aby wątek mógł sprawdzić self.running
+
+            print(f"GUI Server: Nasłuchiwanie na porcie {self.port}...")
+
             while self.running:
                 try:
-                    conn, addr = self.sock.accept()
-                    with conn:
-                        data = conn.recv(1024)
-                        if not data:
-                            continue
-                        try:
-                            msg = json.loads(data.decode())
-                            self.data_callback(msg)
-                        except Exception as e:
-                            self.error_callback(f"Błąd dekodowania JSON: {e}")
+                    conn, addr = self.sock.accept()  # Akceptuj nowe połączenie
+                    print(f"🔌 GUI Server: Połączenie od {addr}")
+                    # Obsługuj klienta w osobnym wątku, aby nie blokować głównego wątku accept()
+                    client_handler = threading.Thread(target=self._handle_client, args=(conn, addr))
+                    client_handler.daemon = True  # Wątek obsługi klienta również jako demon
+                    client_handler.start()
+
                 except socket.timeout:
+                    # Brak nowych połączeń w ciągu 1 sekundy, kontynuuj nasłuchiwanie
                     continue
+                except Exception as e:
+                    # Zgłoś błąd akceptowania połączenia
+                    self.error_callback(f"Błąd serwera (accept): {e}")
         except Exception as e:
-            self.error_callback(str(e))
+            # Zgłoś błąd inicjalizacji serwera
+            self.error_callback(f"Błąd inicjalizacji serwera GUI: {e}")
         finally:
+            # Upewnij się, że gniazdo serwera jest zamknięte po zakończeniu działania
             if self.sock:
                 self.sock.close()
+            print("GUI Server: Serwer zatrzymany.")
 
-    def stop(self):
-        self.running = False
+    def _handle_client(self, client_socket: socket.socket, addr):
+        """
+        Obsługuje pojedyncze połączenie klienta. Odczytuje dane, przetwarza je
+        i wysyła potwierdzenie (ACK). Utrzymuje połączenie, dopóki klient się
+        nie rozłączy lub serwer nie zostanie zatrzymany.
+        """
+        buffer = ""  # Bufor do przechowywania niekompletnych wiadomości
+        client_socket.settimeout(1.0)  # Timeout dla metody recv()
+
+        try:
+            while True:
+                try:
+                    # Odbierz dane z gniazda klienta
+                    chunk = client_socket.recv(1024).decode("utf-8")
+                except socket.timeout:
+                    # Brak danych w ramach timeoutu, sprawdź, czy serwer nadal działa
+                    if not self.running:
+                        break  # Serwer się zamyka, zakończ obsługę klienta
+                    continue  # Brak danych, kontynuuj pętlę w oczekiwaniu na dane
+
+                if not chunk:
+                    # Klient się rozłączył (gniazdo zostało zamknięte z drugiej strony)
+                    print(f"GUI Server: Klient {addr} rozłączył się.")
+                    break  # Wyjdź z pętli obsługującej klienta
+
+                buffer += chunk  # Dodaj odebrany fragment do bufora
+
+                # Przetwarzaj wszystkie pełne wiadomości zakończone znakiem nowej linii
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)  # Podziel bufor na linię i resztę
+                    try:
+                        parsed = json.loads(line)  # Deserializuj linię JSON
+                        print(f"GUI Server: Odebrano dane od {addr}: {parsed}")
+                        self.data_callback(parsed)  # Przekaż dane do GUI
+                        client_socket.sendall(b"ACK\n")  # Wyślij ACK z powrotem do klienta (ważne: \n)
+                    except json.JSONDecodeError as e:
+                        # Zgłoś błąd dekodowania JSON
+                        self.error_callback(f"Błąd JSON od klienta {addr}: {e}")
+                    except Exception as e:
+                        # Zgłoś inny błąd przetwarzania danych
+                        self.error_callback(f"Błąd przetwarzania danych od klienta {addr}: {e}")
+        except Exception as e:
+            self.error_callback(f"Błąd obsługi klienta {addr}: {e}")
+        finally:
+            # Upewnij się, że gniazdo klienta jest zamknięte po zakończeniu obsługi
+            client_socket.close()
 
 
-# === Bufor danych i obliczanie średnich ===
 class SensorDataBuffer:
+    """
+    Klasa bufora danych sensorów. Przechowuje odczyty w pamięci i
+    udostępnia metody do pobierania najnowszych wartości oraz średnich
+    z różnych przedziałów czasowych.
+    """
+
     def __init__(self):
-        self.data = {}  # sensor_id: [(timestamp, value)]
+        self.data = {}  # Słownik: {sensor_id: [(timestamp, value, unit)]}
+        self.lock = threading.Lock()  # Blokada do bezpiecznego dostępu z wielu wątków
+        self.max_history_length = 100  # Maksymalna liczba odczytów do przechowywania dla każdego sensora
 
-    def add_reading(self, sensor_id, value, unit):
-        now = datetime.now()
-        self.data.setdefault(sensor_id, []).append((now, value, unit))
-        self.cleanup_old(sensor_id)
+    def add_reading(self, msg):
+        """
+        Dodaje odczyt do bufora. Akceptuje cały słownik wiadomości JSON.
+        """
+        try:
+            sensor_id = msg.get("sensor") or msg.get("sensor_id")
+            timestamp_str = msg.get("timestamp")
+            value = float(msg.get("value"))
+            unit = msg.get("unit")
 
-    def cleanup_old(self, sensor_id):
-        now = datetime.now()
-        self.data[sensor_id] = [(ts, val, unit) for ts, val, unit in self.data[sensor_id] if
-                                ts > now - timedelta(hours=12)]
+            # Użyj timestamp z wiadomości, jeśli dostępny, w przeciwnym razie aktualny czas
+            timestamp = datetime.fromisoformat(timestamp_str) if timestamp_str else datetime.now()
+
+            with self.lock:
+                if sensor_id not in self.data:
+                    self.data[sensor_id] = []
+                self.data[sensor_id].append((timestamp, value, unit))
+
+                # Ogranicz bufor do maksymalnej liczby odczytów
+                if len(self.data[sensor_id]) > self.max_history_length:
+                    self.data[sensor_id] = self.data[sensor_id][-self.max_history_length:]
+
+        except (ValueError, TypeError) as e:
+            print(f"Błąd parsowania danych w SensorDataBuffer: {msg} - {e}")
+        except Exception as e:
+            print(f"Nieoczekiwany błąd w add_reading: {e}")
 
     def get_latest(self, sensor_id):
-        if sensor_id in self.data and self.data[sensor_id]:
-            return self.data[sensor_id][-1]
-        return None, None, None
+        """Zwraca najnowszy odczyt dla danego sensora."""
+        with self.lock:
+            if sensor_id in self.data and self.data[sensor_id]:
+                return self.data[sensor_id][-1]  # Zwróć ostatni element
+            return None, None, None  # Zwracaj None dla wszystkich wartości, jeśli brak danych
 
-    def get_avg(self, sensor_id, hours):
-        now = datetime.now()
-        values = [val for ts, val, unit in self.data.get(sensor_id, []) if ts > now - timedelta(hours=hours)]
-        if values:
-            return sum(values) / len(values)
-        return None
+    def get_avg_last_n_readings(self, sensor_id, n_readings):
+        """
+        Oblicza średnią wartość dla danego sensora z ostatnich 'n_readings' odczytów.
+        """
+        with self.lock:
+            if sensor_id not in self.data:
+                return None
+
+            # Pobierz ostatnie N odczytów
+            relevant_readings = self.data[sensor_id][-n_readings:]
+
+            # Wyodrębnij tylko wartości
+            values = [val for ts, val, u in relevant_readings]
+
+            if values:
+                return sum(values) / len(values)
+            return None  # Zwróć None, jeśli nie ma odpowiednich odczytów
 
 
-# === GUI ===
 class SensorServerGUI:
+    """
+    Główna klasa interfejsu użytkownika (GUI) dla serwera sensorów.
+    Zarządza widokiem, uruchamia SensorServer i aktualizuje tabelę danych.
+    """
+
     def __init__(self, root):
         self.root = root
-        self.root.title("Sensor TCP Server")
+        self.root.title("Sensor Monitor GUI")
+        self.root.geometry("800x600")  # Ustaw początkowy rozmiar okna
 
-        self.server = None
-        self.buffer = SensorDataBuffer()
+        self.server = None  # Serwer nie jest uruchamiany automatycznie przy inicjalizacji GUI
+        self.buffer = SensorDataBuffer()  # Bufor do przechowywania danych sensorów
+        self.queue = queue.Queue()  # Kolejka do bezpiecznego przekazywania aktualizacji do GUI z wątków serwera
 
-        self.queue = queue.Queue()
+        self.port_var = tk.StringVar()  # Zmienna do przechowywania wartości portu
+        self._load_port_from_config()  # Wczytaj port z pliku konfiguracyjnego
 
-        self.build_ui()
-        self.load_config()
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.root.after(2000, self.update_table)
+        self.create_widgets()  # Utwórz elementy interfejsu
+        self.update_table()  # Rozpocznij cykliczne odświeżanie tabeli
 
-    def build_ui(self):
-        top_frame = ttk.Frame(self.root)
-        top_frame.pack(fill="x", padx=10, pady=5)
+        # Zarejestruj funkcję do wywołania przy próbie zamknięcia okna
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-        ttk.Label(top_frame, text="Port:").pack(side="left")
-        self.port_var = tk.StringVar()
+        # Wątek do okresowej aktualizacji statusu serwera (startuje z przyciskiem Start)
+        self.update_status_thread = None
+
+    def _load_port_from_config(self) -> int:
+        """Wczytuje port z pliku konfiguracyjnego lub zwraca domyślny."""
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                config = yaml.safe_load(f)
+                port = config.get("port", DEFAULT_PORT)
+                self.port_var.set(str(port))  # Ustaw wartość w zmiennej StringVar
+                return port
+        except Exception as e:
+            messagebox.showwarning("Błąd konfiguracji",
+                                   f"Nie można wczytać portu z {CONFIG_FILE}: {e}. Użycie portu domyślnego {DEFAULT_PORT}.")
+            self.port_var.set(str(DEFAULT_PORT))  # Ustaw domyślny port w zmiennej StringVar
+            return DEFAULT_PORT
+
+    def _save_port_to_config(self):
+        """Zapisuje aktualny port do pliku konfiguracyjnego."""
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                yaml.dump({"port": int(self.port_var.get())}, f)
+        except Exception as e:
+            messagebox.showerror("Błąd zapisu konfiguracji", f"Nie można zapisać portu do {CONFIG_FILE}: {e}")
+
+    def create_widgets(self):
+        """Tworzy i rozmieszcza elementy GUI."""
+        # Górny panel (Port, Start, Stop)
+        top_frame = ttk.Frame(self.root, padding="10")
+        top_frame.pack(fill="x")
+
+        ttk.Label(top_frame, text="Port:").pack(side="left", padx=(0, 5))
         self.port_entry = ttk.Entry(top_frame, textvariable=self.port_var, width=8)
-        self.port_entry.pack(side="left", padx=5)
+        self.port_entry.pack(side="left", padx=(0, 10))
 
         self.start_btn = ttk.Button(top_frame, text="Start", command=self.start_server)
-        self.start_btn.pack(side="left", padx=5)
+        self.start_btn.pack(side="left", padx=(0, 5))
+
         self.stop_btn = ttk.Button(top_frame, text="Stop", command=self.stop_server, state="disabled")
-        self.stop_btn.pack(side="left", padx=5)
+        self.stop_btn.pack(side="left")
 
-        self.tree = ttk.Treeview(self.root, columns=("val", "unit", "ts", "avg1h", "avg12h"), show="headings")
-        self.tree.heading("val", text="Ostatnia wartość")
-        self.tree.heading("unit", text="Jednostka")
-        self.tree.heading("ts", text="Timestamp")
-        self.tree.heading("avg1h", text="Średnia 1h")
-        self.tree.heading("avg12h", text="Średnia 12h")
-        self.tree.column("val", width=100)
-        self.tree.column("unit", width=80)
-        self.tree.column("ts", width=150)
-        self.tree.column("avg1h", width=100)
-        self.tree.column("avg12h", width=100)
-        self.tree.pack(fill="both", expand=True, padx=10, pady=5)
+        # Pasek statusu (na dole okna)
+        status_frame = ttk.Frame(self.root, padding="10")
+        status_frame.pack(fill="x", side="bottom")
+        self.status_var = tk.StringVar(value="Status: Zatrzymany")
+        status_label = ttk.Label(status_frame, textvariable=self.status_var, relief="sunken", anchor="w")
+        status_label.pack(fill="x")
 
-        self.status_var = tk.StringVar(value="Status: zatrzymany")
-        self.status_label = ttk.Label(self.root, textvariable=self.status_var, relief="sunken", anchor="w")
-        self.status_label.pack(fill="x", side="bottom")
+        # Tabela (Treeview) do wyświetlania danych sensorów (środkowa część)
+        columns = ("Wartość", "Jednostka", "Czas", "Średnia (ostatni odczyt)", "Średnia (12 ostatnich odczytów)")
+        self.tree = ttk.Treeview(self.root, columns=columns, show="headings")
+        self.tree.pack(fill="both", expand=True, padx=10, pady=10)
 
-    def load_config(self):
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, 'r') as f:
-                cfg = yaml.safe_load(f)
-                self.port_var.set(cfg.get("port", DEFAULT_PORT))
-        else:
-            self.port_var.set(str(DEFAULT_PORT))
+        # Nagłówki kolumn tabeli
+        self.tree.heading("#0", text="Sensor ID")
+        self.tree.heading("Wartość", text="Wartość")
+        self.tree.heading("Jednostka", text="Jednostka")
+        self.tree.heading("Czas", text="Czas")
+        self.tree.heading("Średnia (ostatni odczyt)", text="Średnia (ost. odczyt)")  # Zmieniona nazwa
+        self.tree.heading("Średnia (12 ostatnich odczytów)", text="Średnia (12 ost. odczytów)")  # Zmieniona nazwa
 
-    def save_config(self):
-        with open(CONFIG_FILE, 'w') as f:
-            yaml.dump({"port": int(self.port_var.get())}, f)
+        # Szerokość kolumn tabeli
+        self.tree.column("#0", width=100, anchor="w")
+        self.tree.column("Wartość", width=100, anchor="center")
+        self.tree.column("Jednostka", width=80, anchor="center")
+        self.tree.column("Czas", width=160, anchor="center")
+        self.tree.column("Średnia (ostatni odczyt)", width=160, anchor="center")  # Zmieniona szerokość
+        self.tree.column("Średnia (12 ostatnich odczytów)", width=160, anchor="center")  # Zmieniona szerokość
 
     def start_server(self):
+        """Uruchamia wątek serwera TCP."""
+        if self.server and self.server.running:
+            return  # Serwer już działa
+
         try:
             port = int(self.port_var.get())
-            self.server = SensorServer(port, self.handle_data, self.handle_error)
-            self.server.start()
-            self.status_var.set(f"Status: nasłuchiwanie na porcie {port}")
+            self._save_port_to_config()  # Zapisz port przed uruchomieniem
+
+            self.server = SensorServer(port, self.handle_data_from_server_thread, self.handle_error)
+            self.server.start()  # Uruchom wątek serwera
+            self.status_var.set(f"Status: Nasłuchiwanie na porcie {port}...")
             self.start_btn["state"] = "disabled"
             self.stop_btn["state"] = "normal"
+            self.port_entry["state"] = "disabled"  # Zablokuj edycję portu po starcie
+
+            # Uruchom wątek aktualizacji statusu, jeśli jeszcze nie działa
+            if not self.update_status_thread or not self.update_status_thread.is_alive():
+                self.update_status_thread = threading.Thread(target=self._update_status_periodically, daemon=True)
+                self.update_status_thread.start()
+
+        except ValueError:
+            messagebox.showerror("Błąd portu", "Port musi być liczbą całkowitą.")
+            self.status_var.set("Status: Błąd portu")
         except Exception as e:
-            messagebox.showerror("Błąd", f"Nie można uruchomić serwera: {e}")
-            self.status_var.set("Status: błąd")
+            messagebox.showerror("Błąd uruchomienia serwera", f"Nie można uruchomić serwera: {e}")
+            self.status_var.set("Status: Błąd")
 
     def stop_server(self):
+        """Zatrzymuje wątek serwera TCP."""
         if self.server:
-            self.server.stop()
-            self.server = None
-            self.status_var.set("Status: zatrzymany")
-            self.start_btn["state"] = "normal"
-            self.stop_btn["state"] = "disabled"
+            self.server.running = False  # Ustaw flagę zatrzymania dla wątku serwera
+            self.server.join(timeout=3)  # Poczekaj na zakończenie wątku serwera
+            self.server = None  # Usuń referencję do serwera
 
-    def handle_data(self, msg):
-        try:
-            # Zmiana z "sensor_id" na "sensor" aby pasowało do oczekiwanego formatu
-            sensor = msg.get("sensor") or msg.get("sensor_id")  # Akceptuj oba formaty
-            value = float(msg["value"])
-            unit = msg["unit"]
-            self.buffer.add_reading(sensor, value, unit)
-            self.queue.put(sensor)
-        except Exception as e:
-            self.handle_error(f"Niepoprawne dane: {e}")
+            # Wątek aktualizacji statusu jest daemonem i zakończy się wraz z self.server.running=False
+            # i zakończeniem pętli w _update_status_periodically.
+
+        self.status_var.set("Status: Zatrzymany")
+        self.start_btn["state"] = "normal"
+        self.stop_btn["state"] = "disabled"
+        self.port_entry["state"] = "normal"  # Odblokuj edycję portu
+
+    def handle_data_from_server_thread(self, msg):
+        """
+        Metoda wywoływana z wątku serwera do aktualizacji danych.
+        Umieszcza dane w buforze i sygnalizuje GUI, że dane są gotowe do wyświetlenia.
+        """
+        self.buffer.add_reading(msg)  # Dodaj całą wiadomość do bufora
+        sensor_id = msg.get("sensor") or msg.get("sensor_id")
+        if sensor_id:
+            self.queue.put(sensor_id)  # Umieść ID sensora w kolejce GUI
 
     def handle_error(self, err):
-        self.status_var.set(f"Status: błąd - {err}")
+        """
+        Obsługuje błędy zgłoszone przez wątek serwera.
+        Aktualizuje pasek statusu GUI w sposób bezpieczny dla wątków.
+        """
+        self.root.after(0, lambda: self.status_var.set(f"Status: błąd - {err}"))
+
+    def _update_status_periodically(self):
+        """
+        Wątek pomocniczy do okresowej aktualizacji statusu serwera na GUI.
+        """
+        while self.server and self.server.running:  # Sprawdzaj, czy serwer istnieje i działa
+            if self.server.sock:
+                self.root.after(0,
+                                lambda: self.status_var.set(f"Status: Nasłuchiwanie na porcie {self.server.port}..."))
+            time.sleep(5)  # Odświeżaj status co 5 sekund
+        # Gdy serwer się zatrzyma (lub self.server stanie się None), zaktualizuj status na "Zatrzymany"
+        self.root.after(0, lambda: self.status_var.set("Status: Zatrzymany"))
 
     def update_table(self):
-        updated = set()
+        """
+        Cyklicznie odświeża dane w tabeli GUI na podstawie danych z bufora.
+        Pobiera zaktualizowane sensory z kolejki.
+        """
+        updated_sensors = set()
         while not self.queue.empty():
-            updated.add(self.queue.get())
+            updated_sensors.add(self.queue.get())
 
-        for sensor in updated:
-            latest = self.buffer.get_latest(sensor)
-            avg1h = self.buffer.get_avg(sensor, 1)
-            avg12h = self.buffer.get_avg(sensor, 12)
-            values = (f"{latest[1]:.2f}" if latest[1] else "",
-                      latest[2] or "",
-                      latest[0].strftime('%Y-%m-%d %H:%M:%S') if latest[0] else "",
-                      f"{avg1h:.2f}" if avg1h else "",
-                      f"{avg12h:.2f}" if avg12h else "")
+        for sensor_id in updated_sensors:
+            latest_ts, latest_val, latest_unit = self.buffer.get_latest(sensor_id)
 
-            if sensor in self.tree.get_children():
-                self.tree.item(sensor, values=values)
+            # "Średnia za 1h" = aktualizacja danych po wysłaniu nowych danych przez klienta, czyli ostatni odczyt
+            avg_last_reading = latest_val
+
+            # "Średnia za 12h" = średnia z ostatnich 12 odświeżeń (odczytów)
+            avg_last_12_readings = self.buffer.get_avg_last_n_readings(sensor_id, 12)
+
+            # Formatuj wartości do wyświetlenia, używając "N/A" dla brakujących danych
+            values = (
+                f"{latest_val:.2f}" if latest_val is not None else "N/A",
+                latest_unit or "N/A",
+                latest_ts.strftime('%Y-%m-%d %H:%M:%S') if latest_ts else "N/A",
+                f"{avg_last_reading:.2f}" if avg_last_reading is not None else "N/A",
+                f"{avg_last_12_readings:.2f}" if avg_last_12_readings is not None else "N/A"
+            )
+
+            # Zaktualizuj istniejący wiersz lub wstaw nowy
+            if sensor_id in self.tree.get_children():
+                self.tree.item(sensor_id, values=values)
             else:
-                self.tree.insert("", "end", iid=sensor, text=sensor, values=values)
+                self.tree.insert("", "end", iid=sensor_id, text=sensor_id, values=values)
 
-        self.root.after(2000, self.update_table)
+        self.root.after(1000, self.update_table)  # Zaplanuj kolejne odświeżenie za 1 sekundę
 
-    def on_close(self):
-        self.save_config()
-        self.stop_server()
-        self.root.destroy()
+    def on_closing(self):
+        """
+        Obsługuje zdarzenie zamknięcia okna GUI.
+        Zatrzymuje wątek serwera i zamyka aplikację.
+        """
+        if messagebox.askokcancel("Zamknij", "Czy na pewno chcesz zamknąć aplikację?"):
+            self._save_port_to_config()  # Zapisz port przed zamknięciem
+            self.stop_server()  # Zatrzymanie serwera
+
+            self.root.destroy()  # Zniszcz okno Tkinter
 
 
+# Jeśli ten plik jest uruchamiany bezpośrednio (do testów GUI)
 if __name__ == '__main__':
     root = tk.Tk()
     app = SensorServerGUI(root)
     root.mainloop()
+
