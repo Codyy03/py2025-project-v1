@@ -27,3 +27,12 @@ Projekt obejmuje:
 
 ### **Uruchamianie systemu**
 1. **Serwer**
+   - Przejdź do katalogu serwera.
+   - Uruchom `main.py`.
+   - Włącz serwer w GUI.
+
+2. **Klient**
+   - Przejdź do katalogu klienta.
+   - Uruchom `main.py`.
+
+---
